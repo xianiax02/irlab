@@ -1,0 +1,110 @@
+# irlab
+
+에어컨 리모컨 IR 신호를 **읽고 · 이름 붙여 저장하고 · 골라서 쏘는** 터미널 도구.
+
+현장에서 "에어컨이 반응을 안 한다"의 원인이 셋인데 구별할 수단이 없어서 만들었다.
+
+| 후보 | irlab 이 가르는 방법 |
+|---|---|
+| ① 리모컨 캡처가 틀렸다 | 캡처한 걸 되쏴서 에어컨이 반응하면 캡처는 옳다 |
+| ② 우리가 만든 프레임이 틀렸다 | 기준 신호와 **바이트 단위 diff** |
+| ③ IR 이 안 닿는다 | ①②가 통과했는데 안 되면 남는 건 도달뿐 |
+
+프로토콜을 **몰라도** 쓸 수 있다. 해독이 안 되는 기종은 raw 타이밍을 통째로 녹음했다가 그대로 재생한다.
+
+## 설치
+
+```bash
+uv tool install git+https://github.com/xianiax02/irlab
+irlab
+```
+
+Python 3.11+ 필요. macOS / Linux.
+
+## 쓰기
+
+```bash
+irlab                 # 실행 후 화면에서 매장 선택
+irlab <매장>          # 매장 바로 열기
+irlab --list-ports    # 시리얼 포트 후보
+irlab --stores        # 저장된 매장 목록
+irlab <매장> --show   # 신호 목록만 출력
+```
+
+| 키 | 하는 일 |
+|---|---|
+| `r` | 리딩 시작/정지 |
+| `s` | 방금 받은 신호를 이름 붙여 저장 |
+| `enter` | 고른 신호 쏘기 |
+| `t` | 10회 반복 송신 |
+| `p` | 판별된 프로토콜을 송신부에 적용 |
+| `d` · `m` · `q` | 삭제 · 매장 변경 · 종료 |
+
+## 하드웨어
+
+USB 시리얼로 붙는 마이크로컨트롤러 + 38kHz IR 수신모듈(VS1838B 등) + IR LED.
+레퍼런스 구현은 ESP32-C3 + [IRremoteESP8266](https://github.com/crankyoldgit/IRremoteESP8266).
+
+```
+VS1838B  OUT ──────────────── GPIO(수신)
+         GND ──────────────── GND
+         VCC ──[100Ω]──┬───── 3V3      ⚠️ 5V 금지 (C3 GPIO 는 5V 비내성)
+                    [10µF]
+                       └───── GND      ⚠️ 생략 금지 (AGC 내장이라 false trigger)
+```
+
+핀 순서는 수광면(돔)을 마주 본 기준 `OUT–GND–VCC` 고정이다. 데이터시트 확인 없이 꽂지 말 것.
+
+## 와이어 프로토콜
+
+기기는 사람이 읽는 줄과 별도로 **`@` 로 시작하는 한 줄 CSV** 를 낸다. 이 도구는 `@` 줄만 읽으므로,
+아래 계약만 지키면 어떤 펌웨어로도 붙는다.
+
+**기기 → 호스트**
+
+```
+@RX,<ms>,<protocol>,<bits>,<hex>,<지원 0/1>,<rawlen>
+@ACT,<ms>,<edges>                        해독 실패했지만 신호는 들어온다
+@MATCH,<ms>
+@DIFF,<ms>,<n>,<idx:ref:got|...>
+@DIFFPROTO,<ms>,<ref>,<got>   @DIFFBITS,…   @DIFFVAL,…
+@SLOT,<i>,<used>,<protocol>,<bits>,<hex>,<rawlen>,<trunc>,<isref>
+@STATE,<txpin>,<rxpin>,<protocol>,<power>,<temp>,<mode>,<fan>,<swing>,<ref>
+@RAWBEG,<slot>,<khz>,<n>,<trunc>  →  @RAWCHK,<off>,<v>,<v>,…  →  @RAWEND,<slot>,<n>
+@PUSHBEG,<khz>   @PUSHBUF,<n>   @PUSHSENT,<ms>,<n>,<khz>   @RAWERR,<사유>
+```
+
+**호스트 → 기기**
+
+```
+learn [N] · ref N · slots · clear [N] · replay [N] · dump [N]
+s · on · off · t <16~30> · m <0~4> · f <0~3> · w <0|1> · p <protocol> · sweep · ?
+rawbegin <khz>  →  rawdata <v> <v> …  (여러 번)  →  rawsend
+```
+
+`@ACT` 가 중요하다. 해독에 성공해야만 뭔가 찍히면 **"신호가 안 온다"와 "신호는 오는데 해독을 못
+한다"를 구별할 수 없다.** 현장에서 바로 물리는 자리다.
+
+## 저장 형식
+
+매장 하나가 파일 하나다 (`~/.irlab/stores/<매장>.json`). 섞어 두면 **다른 매장 신호를 잘못 쏜다.**
+
+```json
+{ "store": "…",
+  "signals": [
+    { "name": "냉방 24도", "protocol": "UNKNOWN", "bits": 0, "payload": "",
+      "raw": [8500, 4250, 550, …], "carrier_khz": 38,
+      "truncated": false, "captured_at": "2026-09-22T11:04:12" }
+  ] }
+```
+
+## 알려진 한계
+
+- **캐리어 주파수는 못 잰다.** 복조 수신모듈은 캐리어를 이미 벗겨서 준다. 재생은 38kHz 를
+  **가정**하는 것이고, 기종이 36·40kHz 면 재생만 안 먹을 수 있다. 판별 방법은 쏴보는 것뿐이다.
+- **raw 는 녹음한 것만 재생된다.** 프로토콜을 알면 "25도"를 만들어낼 수 있지만 raw 는 못 만든다.
+  쓸 상태를 각각 녹음해 둬야 한다.
+- **긴 프레임은 기기 버퍼에서 잘릴 수 있다.** 잘리면 `truncated` 로 표시되고 재생이 불완전해진다
+  (디코드 대조는 그대로 유효).
+- `SERVER_PROTOCOLS` 는 **백엔드가 등록을 받아주는 목록**이라 배포처마다 다르다. 자기 값으로 고칠 것.
+  "쏠 수 있다"와 "서버에 등록된다"는 다른 축이고, 이 도구는 둘을 갈라서 보여준다.
