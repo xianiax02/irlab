@@ -44,6 +44,8 @@ class Device:
         self.fd: int | None = None
         self.path: str | None = None
         self._buf = b""
+        # 기기 응답을 기다리는 곳. raw 전송은 ack 없이 보내면 조용히 어긋난다.
+        self._ack: dict[str, asyncio.Future] = {}
 
     # ── 연결 ──
     def open(self, path: str, baud: int = BAUD) -> None:
@@ -98,6 +100,14 @@ class Device:
                 continue
             if line.startswith("@"):
                 p = line[1:].split(",")
+                fut = self._ack.pop(p[0], None)
+                if fut is not None and not fut.done():
+                    fut.set_result(p[1:])
+                if p[0] == "RAWERR":
+                    for f in self._ack.values():
+                        if not f.done():
+                            f.set_exception(RuntimeError(",".join(p[1:])))
+                    self._ack.clear()
                 self.on_event(p[0], p[1:])
             else:
                 self.on_raw(line)
@@ -107,14 +117,51 @@ class Device:
         if self.fd is not None:
             os.write(self.fd, (cmd + "\n").encode())
 
-    def push_raw(self, timings: list[int], khz: int = 38, chunk: int = 24) -> None:
+    def _arm(self, tag: str) -> asyncio.Future:
+        """응답 대기를 **명령을 보내기 전에** 건다.
+
+        보내고 나서 걸면 그 사이에 도착한 응답을 놓친다 — 실제로 테스트에서
+        재현됐다. 등록이 먼저다.
+        """
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._ack[tag] = fut
+        return fut
+
+    async def _wait(self, tag: str, fut: asyncio.Future,
+                    timeout: float = 2.0) -> list[str]:
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            self._ack.pop(tag, None)
+
+    async def push_raw(self, timings: list[int], khz: int = 38,
+                       chunk: int = 24) -> int:
         """노트북 라이브러리의 raw 를 기기로 내려보내고 발사시킨다.
 
         한 줄에 다 못 담아 나눠 보낸다 — 펌웨어 줄 버퍼가 512 바이트다.
         chunk 24 × "65535," ≈ 144 바이트라 여유가 있다.
+
+        ⚠️ **청크마다 기기가 센 누적 개수를 받아 대조한다.** ack 없이 몰아 보내면
+        `rawbegin` 한 줄만 유실돼도 버퍼가 리셋되지 않아 **다음 전송이 누적되고**,
+        결국 "버퍼 초과" 로 터진다 (2026-09-21 실제로 겪음). 조용히 어긋나느니
+        느려도 매 줄을 확인한다.
         """
+        fut = self._arm("PUSHBEG")
         self.send(f"rawbegin {khz}")
+        await self._wait("PUSHBEG", fut)       # 버퍼가 실제로 비워졌는지 확인
+
+        sent = 0
         for i in range(0, len(timings), chunk):
-            part = " ".join(str(v) for v in timings[i:i + chunk])
-            self.send(f"rawdata {part}")
+            part = timings[i:i + chunk]
+            fut = self._arm("PUSHBUF")
+            self.send("rawdata " + " ".join(str(v) for v in part))
+            got = await self._wait("PUSHBUF", fut)
+            sent += len(part)
+            n = int(got[0]) if got and got[0].isdigit() else -1
+            if n != sent:
+                raise RuntimeError(f"개수 불일치: 보낸 {sent} ≠ 기기 {n}")
+
+        fut = self._arm("PUSHSENT")
         self.send("rawsend")
+        await self._wait("PUSHSENT", fut, timeout=4.0)
+        return sent

@@ -315,8 +315,18 @@ class IrlabApp(App[None]):
         if not s.raw:
             self.log_line("raw 가 없는 신호다")
             return
-        self.dev.push_raw(s.raw, s.carrier_khz)
+        self.send_one(s)
+
+    @work
+    async def send_one(self, s: Signal) -> None:
         self.log_line(f"쏘기 «{s.name}»  raw {len(s.raw)} @ {s.carrier_khz}kHz")
+        try:
+            n = await self.dev.push_raw(s.raw, s.carrier_khz)
+            self.log_line(f"  전송 {n}칸 확인 후 발사")
+        except TimeoutError:
+            self.log_line("  ✕ 기기 응답 없음 — 연결 확인")
+        except RuntimeError as e:
+            self.log_line(f"  ✕ {e}")
 
     def action_test_selected(self) -> None:
         i = self.selected_index()
@@ -330,10 +340,16 @@ class IrlabApp(App[None]):
     @work
     async def repeat_send(self, s: Signal) -> None:
         import asyncio
+        ok = 0
         for k in range(10):
-            self.dev.push_raw(s.raw, s.carrier_khz)
-            self.log_line(f"  [{k + 1}/10] 발사")
+            try:
+                await self.dev.push_raw(s.raw, s.carrier_khz)
+                ok += 1
+                self.log_line(f"  [{k + 1}/10] 발사")
+            except (TimeoutError, RuntimeError) as e:
+                self.log_line(f"  [{k + 1}/10] ✕ {e}")
             await asyncio.sleep(2.0)
+        self.log_line(f"반복 송신 끝 — 성공 {ok}/10")
 
     def action_delete_signal(self) -> None:
         i = self.selected_index()
