@@ -6,7 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import __version__, code_fingerprint
+from . import __dist__, __version__, code_fingerprint
 from .device import find_ports
 from .library import DEFAULT_DIR, Library, list_stores
 
@@ -30,7 +30,7 @@ def main() -> int:
 
     if a.version:
         from pathlib import Path as _P
-        print(f"irlab {__version__}")
+        print(f"{__dist__} {__version__}")
         print(f"  code  {code_fingerprint()}   ← 설치본과 소스에서 이 값이 같아야 최신이다")
         print(f"  path  {_P(__file__).parent}")
         return 0

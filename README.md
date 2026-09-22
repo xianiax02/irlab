@@ -15,6 +15,10 @@
 ## 설치
 
 ```bash
+pip install ggirlab            # PyPI (발행 예정)
+uv tool install ggirlab        # 또는 격리 설치
+
+# 소스에서
 uv tool install git+https://github.com/xianiax02/irlab
 irlab
 ```
@@ -41,16 +45,31 @@ irlab --version       # 버전 · 코드 지문 · 설치 경로
 ```bash
 uv tool install --force ~/irlab                                  # 로컬 소스에서
 uv tool install --force git+https://github.com/xianiax02/irlab   # 원격에서
+uv tool upgrade ggirlab                                          # PyPI 판은 이걸로 된다
 ```
 
 반영됐는지는 **코드 지문으로 대조**한다. 버전 번호는 올리는 걸 잊을 수 있지만
 이 값은 코드가 바뀌면 반드시 바뀐다.
 
 ```bash
-irlab --version                                                  # 설치본
+ggirlab --version                                                # 설치본
 (cd ~/irlab && PYTHONPATH=src python3 -m irlab.cli --version)    # 소스 트리
 #  → 두 줄의 code 값이 같으면 최신이다
 ```
+
+> 소스 트리에서는 버전이 `0.0.0+source` 로 나온다. 버전은 **설치 메타데이터에서만**
+> 읽기 때문이다(pyproject 를 단일 출처로 두려고). 대조에 쓰는 값은 `code` 뿐이다.
+
+### 이름
+
+| | |
+|---|---|
+| 배포명 (`pip install …`) | **`ggirlab`** |
+| 실행 명령 | **`ggirlab`** · `irlab` (별칭, 기존 문서 호환) |
+| import 패키지 | `irlab` |
+
+⚠️ 펌웨어의 `env:irtest` 는 **다른 것**이다 — LG2 하드코딩된 구 송신 전용 env 이고
+센터에 쓰면 안 된다. 이 도구와 혼동하지 말 것.
 
 | 키 | 하는 일 |
 |---|---|

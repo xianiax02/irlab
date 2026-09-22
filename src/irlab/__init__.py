@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
-__all__ = ["__version__", "code_fingerprint"]
+__all__ = ["__version__", "__dist__", "code_fingerprint"]
 
-__version__ = "0.2.0"
+# 배포명은 ggirlab, import 패키지명은 irlab 이다 (pillow→PIL 과 같은 형태).
+__dist__ = "ggirlab"
+
+# 버전은 **설치 메타데이터에서 읽는다** — pyproject 를 단일 출처로 두기 위해서다.
+# 여기 숫자를 따로 적어두면 pyproject 와 갈라지고, 갈라진 걸 알 방법이 없다.
+try:  # 설치된 경우
+    from importlib.metadata import version as _version
+
+    __version__ = _version(__dist__)
+except Exception:  # 소스 트리에서 직접 실행 (PYTHONPATH=src)
+    __version__ = "0.0.0+source"
 
 
 def code_fingerprint() -> str:

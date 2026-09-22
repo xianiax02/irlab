@@ -1,16 +1,46 @@
 [project]
-name = "irlab"
+name = "ggirlab"
 version = "0.2.0"
 description = "그린고래 IR 진단기 — 매장 리모컨 신호를 읽고, 이름 붙여 저장하고, 골라서 쏜다"
+readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Junhyoun Lim" }]
+keywords = ["ir", "infrared", "remote", "hvac", "esp32", "diagnostics", "tui"]
 dependencies = ["textual>=0.79"]
 
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: System :: Hardware",
+    "Topic :: Utilities",
+    "Natural Language :: Korean",
+]
+
+[project.urls]
+Homepage = "https://github.com/xianiax02/irlab"
+Repository = "https://github.com/xianiax02/irlab"
+
+# 배포명은 ggirlab 이지만 **명령은 둘 다 살린다.** irlab 은 이미 문서·세션로그·
+# 손가락 기억에 들어가 있어서 끊으면 비용이 크고, 여기 두 줄 쓰는 건 공짜다.
 [project.scripts]
+ggirlab = "irlab.cli:main"
 irlab = "irlab.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+# import 패키지명은 irlab 그대로 둔다 — 배포명과 다른 건 흔하다(pillow→PIL).
 [tool.hatch.build.targets.wheel]
 packages = ["src/irlab"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/irlab", "README.md", "LICENSE"]
