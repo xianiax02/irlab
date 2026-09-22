@@ -49,10 +49,15 @@ def main() -> int:
         print(f"{lib.store}  —  {lib.path}")
         if not lib.signals:
             print("  (신호 없음)")
+        from .decode import describe
         for i, s in enumerate(lib.signals, 1):
             print(f"  {i:>2}  {s.name:<24} {s.protocol:<14} "
                   f"서버{'✓' if s.server_ok else '✗'}  raw {len(s.raw)}"
                   + ("  ⚠잘림" if s.truncated else ""))
+            what = describe(s.protocol, s.payload)
+            if what:
+                # 이름은 사람의 주장, 이 줄은 프레임의 내용이다. 어긋나면 여기서 잡힌다.
+                print(f"      ▶ {what}")
         return 0
 
     from .app import IrlabApp

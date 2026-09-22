@@ -22,6 +22,7 @@ from textual.widgets import (
 
 from pathlib import Path
 
+from .decode import describe
 from .device import Device, find_ports
 from .library import DEFAULT_DIR, Library, Signal, list_stores
 
@@ -182,7 +183,7 @@ class IrlabApp(App[None]):
 
     def on_mount(self) -> None:
         t = self.query_one("#lib", DataTable)
-        t.add_columns("#", "이름", "프로토콜", "서버", "raw")
+        t.add_columns("#", "이름", "프로토콜", "무슨 명령인가", "서버", "raw")
         self.refresh_lib()
         self.refresh_bar()
         self.connect()
@@ -239,7 +240,11 @@ class IrlabApp(App[None]):
         if self.lib is None:
             return
         for i, s in enumerate(self.lib.signals, 1):
+            # 이름은 사람이 붙인 주장이고, 이 칸은 프레임이 실제로 담고 있는 값이다.
+            # 둘이 어긋나는 것을 눈으로 잡으라고 나란히 둔다 (2026-09-22 «turn off» 가
+            # 실제로는 전원 ON 이었던 건).
             t.add_row(str(i), s.name, s.protocol,
+                      describe(s.protocol, s.payload) or "—",
                       "✓" if s.server_ok else "✗", str(len(s.raw)))
 
     def log_line(self, s: str) -> None:
@@ -372,11 +377,13 @@ class IrlabApp(App[None]):
         L = self.last
         from .library import server_ok
         ok = server_ok(L["proto"])
+        what = describe(L["proto"], L.get("payload", ""))
         self.detail(
             f"[b]{L['proto']}[/]  {L['bits']}b  raw {L['rawlen']}\n"
             f"{L['payload'][:64]}\n"
-            f"쏠 수 있음 {'[green]✓[/]' if L['sup'] else '[red]✗[/]'}    "
-            f"서버 등록 {'[green]✓[/]' if ok else '[red]✗ (SUPPORTED_PROTOCOLS 에 없음)[/]'}")
+            + (f"[b yellow]{what}[/]\n" if what else "")
+            + f"쏠 수 있음 {'[green]✓[/]' if L['sup'] else '[red]✗[/]'}    "
+              f"서버 등록 {'[green]✓[/]' if ok else '[red]✗ (SUPPORTED_PROTOCOLS 에 없음)[/]'}")
 
     # ── 저장 ──
     async def pull_raw(self, timeout: float = 5.0) -> dict:
@@ -423,8 +430,10 @@ class IrlabApp(App[None]):
         meta = dict(self.slot)          # 키를 누른 그 순간의 슬롯 내용
         self._hold = True               # 밑에서 갈리지 않게 굴림 정지
         try:
+            what = describe(meta["proto"], meta["payload"])
             self.log_line(f"고정 «{meta['proto']} {meta['bits']}b raw {meta['rawlen']}»"
-                          " — 이름을 입력하세요")
+                          + (f"  [b yellow]{what}[/]" if what else "")
+                          + " — 이름을 입력하세요")
             try:
                 pend = await self.pull_raw()
             except (TimeoutError, RuntimeError) as e:
@@ -446,8 +455,14 @@ class IrlabApp(App[None]):
             self.lib.add(sig)
             self.refresh_lib()
             self.refresh_bar()
+            what = describe(sig.protocol, sig.payload)
             self.log_line(f"저장 «{sig.name}»  {sig.protocol} {sig.bits}b  "
                           f"raw {len(sig.raw)}" + ("  ⚠잘림" if sig.truncated else ""))
+            if what:
+                # 이름과 내용이 어긋나면 여기서 눈에 띈다. 도구가 이걸 안 보여줘서
+                # 전원 ON 프레임이 «turn off» 로 저장된 채 현장에서 10회 되쏘였다.
+                self.log_line(f"   ▶ 실제 내용: [b yellow]{what}[/] "
+                              "— 이름과 맞는지 확인할 것")
         finally:
             self._hold = False
             if self.reading:
