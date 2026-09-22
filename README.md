@@ -29,6 +29,27 @@ irlab <매장>          # 매장 바로 열기
 irlab --list-ports    # 시리얼 포트 후보
 irlab --stores        # 저장된 매장 목록
 irlab <매장> --show   # 신호 목록만 출력
+irlab --version       # 버전 · 코드 지문 · 설치 경로
+```
+
+### 업데이트 — `uv tool upgrade` 를 믿지 말 것
+
+로컬 경로에서 설치한 경우(`uv tool install ~/irlab`), **버전 번호가 그대로면 uv 는
+조용히 건너뛴다** — `Nothing to upgrade` 를 뱉고 구코드가 계속 돈다. 고친 게 반영된 줄
+알고 쓰게 되는 자리라, 갱신은 항상 `--force` 로 한다.
+
+```bash
+uv tool install --force ~/irlab                                  # 로컬 소스에서
+uv tool install --force git+https://github.com/xianiax02/irlab   # 원격에서
+```
+
+반영됐는지는 **코드 지문으로 대조**한다. 버전 번호는 올리는 걸 잊을 수 있지만
+이 값은 코드가 바뀌면 반드시 바뀐다.
+
+```bash
+irlab --version                                                  # 설치본
+(cd ~/irlab && PYTHONPATH=src python3 -m irlab.cli --version)    # 소스 트리
+#  → 두 줄의 code 값이 같으면 최신이다
 ```
 
 | 키 | 하는 일 |

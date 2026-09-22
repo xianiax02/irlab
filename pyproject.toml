@@ -1,6 +1,6 @@
 [project]
 name = "irlab"
-version = "0.1.0"
+version = "0.2.0"
 description = "그린고래 IR 진단기 — 매장 리모컨 신호를 읽고, 이름 붙여 저장하고, 골라서 쏜다"
 requires-python = ">=3.11"
 dependencies = ["textual>=0.79"]

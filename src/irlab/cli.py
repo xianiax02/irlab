@@ -6,6 +6,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import __version__, code_fingerprint
 from .device import find_ports
 from .library import DEFAULT_DIR, Library, list_stores
 
@@ -21,9 +22,18 @@ def main() -> int:
     ap.add_argument("--list-ports", action="store_true")
     ap.add_argument("--stores", action="store_true", help="저장된 매장 목록")
     ap.add_argument("--show", action="store_true", help="매장 신호 목록만 출력하고 종료")
+    ap.add_argument("--version", action="store_true",
+                    help="버전·코드 지문·설치 경로 (설치본이 최신인지 대조용)")
     ap.add_argument("--selftest", action="store_true",
                     help="실기기 없이 호스트 프로토콜을 검증 (가짜 펌웨어를 pty 로 띄운다)")
     a = ap.parse_args()
+
+    if a.version:
+        from pathlib import Path as _P
+        print(f"irlab {__version__}")
+        print(f"  code  {code_fingerprint()}   ← 설치본과 소스에서 이 값이 같아야 최신이다")
+        print(f"  path  {_P(__file__).parent}")
+        return 0
 
     if a.selftest:
         from .selftest import main as selftest_main
