@@ -1,8 +1,8 @@
 """irlab TUI — 리딩 모드 · 신호 라이브러리 · 도달 시험.
 
-⚠️ 이 리그는 **자기가 쏜 것을 자기가 받지 못한다** (펌웨어가 송신 중 수신을 끈다).
+⚠️ 이 진단기는 **자기가 쏜 것을 자기가 받지 못한다** (펌웨어가 송신 중 수신을 끈다).
 그래서 "쏘기" 의 성공은 *발사* 성공이지 *도달* 이 아니다. 도달을 재는 것은
-`수신 창 시험` 뿐이다 — 노드나 리모컨이 쏘는 동안 리그가 몇 개나 받는지 센다.
+`수신 창 시험` 뿐이다 — 노드나 리모컨이 쏘는 동안 진단기가 몇 개나 받는지 센다.
 """
 
 from __future__ import annotations
@@ -265,7 +265,7 @@ class IrlabApp(App[None]):
     # ── 기기 이벤트 ──
     def dev_raw(self, line: str) -> None:
         # 대조 결과("      DIFF: …"·"      MATCH ref")는 '#' 로 시작하지 않는다.
-        # 종전처럼 '#' 만 통과시키면 **이 리그의 핵심 출력이 화면에서 통째로 사라진다.**
+        # 종전처럼 '#' 만 통과시키면 **이 진단기의 핵심 출력이 화면에서 통째로 사라진다.**
         self.log_line(line)
 
     def dev_lost(self, why: str) -> None:
@@ -520,7 +520,7 @@ class IrlabApp(App[None]):
             self.refresh_bar()
 
     # ── 도달 시험 ──
-    # ⚠️ 이 리그는 자기 발사를 자기가 못 받는다. 그래서 "쏘고 몇 번 성공했나" 는
+    # ⚠️ 이 진단기는 자기 발사를 자기가 못 받는다. 그래서 "쏘고 몇 번 성공했나" 는
     #    도달이 아니라 **발사** 계수다. 도달은 이렇게만 잰다: 창을 열어두고
     #    노드/리모컨이 쏘는 동안 실제로 들어온 프레임을 센다.
     def action_reach_test(self) -> None:
@@ -597,7 +597,7 @@ class IrlabApp(App[None]):
             self.refresh_bar()
 
     def action_apply_protocol(self) -> None:
-        """판별된 프로토콜을 리그 TX 에 적용 + 서버에 넣을 값을 띄운다."""
+        """판별된 프로토콜을 진단기 TX 에 적용 + 서버에 넣을 값을 띄운다."""
         if not self.last:
             return
         from .library import decode_type_of
@@ -605,10 +605,10 @@ class IrlabApp(App[None]):
         self.dev.send(f"p {proto}")
         dt_ = decode_type_of(proto)
         if dt_ is None:
-            self.log_line(f"{proto} → 리그 TX 에 적용. "
+            self.log_line(f"{proto} → 진단기 TX 에 적용. "
                           "⚠ 서버 SUPPORTED_PROTOCOLS 에 없어 대시보드 등록 불가")
         else:
-            self.log_line(f"{proto} → 리그 TX 적용. "
+            self.log_line(f"{proto} → 진단기 TX 적용. "
                           f"대시보드에 넣을 값: {proto} (decode_type {dt_})")
 
     def on_unmount(self) -> None:
