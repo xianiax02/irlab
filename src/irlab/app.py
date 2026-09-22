@@ -157,7 +157,11 @@ class IrlabApp(App[None]):
         self.reading = False
         self.last: dict | None = None      # 마지막 수신 프레임 요약
         self.pending: dict | None = None   # dump 로 받는 중인 raw
-        self.pending_name: str | None = None
+        self._dump_fut = None              # dump 완료를 기다리는 곳
+        # 기기 작업 슬롯에 **실제로 들어 있는** 프레임. @SLOT 이 정본이다.
+        # self.last(=마지막 수신)와 갈라야 하는 이유는 저장 경로 주석 참조.
+        self.slot: dict | None = None
+        self._hold = False                 # 저장 중 굴림 재무장 정지
         self.pos_label = ""                # 현재 측정 위치
         self.rows: list[dict] = []         # 시험 기록 (CSV 로 나간다)
         self._tally: dict | None = None    # 시험 중 계수기
@@ -283,10 +287,20 @@ class IrlabApp(App[None]):
             if self._tally is not None:
                 self._tally["rx"] += 1
                 self._tally["protos"].add(proto)
-            if self.reading:
+            if self.reading and not self._hold:
                 # 굴림 캡처는 **ref(slot0) 가 아닌 작업 슬롯**으로 받는다.
                 # slot0 로 받으면 리모컨 기준값이 매 프레임 덮어써져서 대조가 무의미해진다.
+                # _hold 중에는 재무장하지 않는다 — 저장할 프레임이 밑에서 갈리면 안 된다.
                 self.dev.send(f"learn {SCRATCH_SLOT}")
+
+        elif tag == "SLOT":
+            # @SLOT,<i>,<used>,<proto>,<bits>,<hex>,<rawlen>,<trunc>,<isref>
+            # **저장은 이 값으로 한다.** self.last 는 '마지막으로 들어온 프레임' 이라
+            # 슬롯에 실제로 담긴 것과 다를 수 있다(리딩 꺼진 뒤 들어온 프레임 등).
+            if len(p) >= 7 and int(p[0]) == SCRATCH_SLOT:
+                self.slot = ({"proto": p[2], "bits": int(p[3] or 0), "payload": p[4],
+                              "rawlen": int(p[5] or 0), "trunc": p[6] == "1"}
+                             if p[1] == "1" else None)
 
         elif tag == "MATCH":
             if self._tally is not None:
@@ -318,10 +332,19 @@ class IrlabApp(App[None]):
                 return
             self.pending["raw"].extend(int(v) for v in p[1:] if v)
         elif tag == "RAWEND" and self.pending is not None:
-            self.finish_capture()
+            pend, self.pending = self.pending, None
+            if self._dump_fut is not None and not self._dump_fut.done():
+                got, want = len(pend["raw"]), pend["n"]
+                if got != want:
+                    self._dump_fut.set_exception(
+                        RuntimeError(f"raw 누락 {got}/{want}"))
+                else:
+                    self._dump_fut.set_result(pend)
         elif tag == "RAWERR":
             self.log_line("기기 오류: " + ",".join(p))
             self.pending = None
+            if self._dump_fut is not None and not self._dump_fut.done():
+                self._dump_fut.set_exception(RuntimeError(",".join(p)))
         elif tag == "TXERR":
             self.log_line(f"[red]발사 거부[/] {p[1] if len(p) > 1 else ''} — 프로토콜 적용 실패")
         elif tag == "ACT":
@@ -356,34 +379,15 @@ class IrlabApp(App[None]):
             f"서버 등록 {'[green]✓[/]' if ok else '[red]✗ (SUPPORTED_PROTOCOLS 에 없음)[/]'}")
 
     # ── 저장 ──
-    def finish_capture(self) -> None:
-        """dump 로 raw 를 다 받았다 → 이름을 물어보고 라이브러리에 넣는다."""
-        pend, self.pending = self.pending, None
-        if pend is None:
-            return
-        got, want = len(pend["raw"]), pend["n"]
-        if got != want:
-            self.log_line(f"⚠ raw 누락 {got}/{want} — 저장 안 함")
-            return
-        if self.lib is None:
-            self.log_line("매장이 없어 저장을 건너뛴다 (m)")
-            return
-        L = self.last or {}
-        sig = Signal(
-            name=self.pending_name or "이름없음",
-            protocol=L.get("proto", "UNKNOWN"),
-            bits=L.get("bits", 0),
-            payload=L.get("payload", ""),
-            raw=pend["raw"],
-            carrier_khz=pend["khz"],
-            truncated=pend["trunc"],
-        )
-        self.lib.add(sig)
-        self.refresh_lib()
-        self.refresh_bar()
-        self.log_line(f"저장 «{sig.name}»  raw {len(sig.raw)}"
-                      + ("  ⚠잘림" if sig.truncated else ""))
-        self.pending_name = None
+    async def pull_raw(self, timeout: float = 5.0) -> dict:
+        """작업 슬롯의 raw 를 기기에서 끌어온다."""
+        fut = asyncio.get_running_loop().create_future()
+        self._dump_fut = fut
+        self.dev.send(f"dump {SCRATCH_SLOT}")
+        try:
+            return await asyncio.wait_for(fut, timeout)
+        finally:
+            self._dump_fut = None
 
     # ── 액션 ──
     def action_toggle_read(self) -> None:
@@ -401,17 +405,53 @@ class IrlabApp(App[None]):
 
     @work
     async def action_save_signal(self) -> None:
+        """작업 슬롯에 담긴 프레임을 이름 붙여 라이브러리에 넣는다.
+
+        순서가 중요하다 — **이름을 묻기 전에 먼저 얼려서 끌어온다.**
+        종전에는 이름 모달을 먼저 띄웠는데, 그동안에도 리딩이 계속 돌아
+        슬롯이 새 프레임으로 덮였다. 이름을 타이핑하는 몇 초 사이에 리모컨이
+        한 번 더 들어오면 **내가 누른 버튼의 이름이 다른 신호에 붙는다.**
+        """
         if self.lib is None:
             self.log_line("매장을 먼저 고르세요 (m)")
             return
-        if not self.last:
-            self.log_line("저장할 신호가 없다 — 먼저 리딩으로 하나 받으세요")
+        if not self.slot:
+            self.log_line(f"작업 슬롯(slot{SCRATCH_SLOT})이 비어 있다 — "
+                          "리딩(r)을 켜고 리모컨을 한 번 받으세요")
             return
-        name = await self.push_screen_wait(NameModal())
-        if not name:
-            return
-        self.pending_name = name
-        self.dev.send(f"dump {SCRATCH_SLOT}")   # 기기에서 raw 를 끌어온다
+
+        meta = dict(self.slot)          # 키를 누른 그 순간의 슬롯 내용
+        self._hold = True               # 밑에서 갈리지 않게 굴림 정지
+        try:
+            self.log_line(f"고정 «{meta['proto']} {meta['bits']}b raw {meta['rawlen']}»"
+                          " — 이름을 입력하세요")
+            try:
+                pend = await self.pull_raw()
+            except (TimeoutError, RuntimeError) as e:
+                self.log_line(f"[red]raw 를 못 가져왔다[/] {e} — 저장 안 함")
+                return
+            name = await self.push_screen_wait(NameModal())
+            if not name:
+                self.log_line("저장 취소")
+                return
+            sig = Signal(
+                name=name,
+                protocol=meta["proto"],
+                bits=meta["bits"],
+                payload=meta["payload"],
+                raw=pend["raw"],
+                carrier_khz=pend["khz"],
+                truncated=pend["trunc"] or meta["trunc"],
+            )
+            self.lib.add(sig)
+            self.refresh_lib()
+            self.refresh_bar()
+            self.log_line(f"저장 «{sig.name}»  {sig.protocol} {sig.bits}b  "
+                          f"raw {len(sig.raw)}" + ("  ⚠잘림" if sig.truncated else ""))
+        finally:
+            self._hold = False
+            if self.reading:
+                self.dev.send(f"learn {SCRATCH_SLOT}")   # 굴림 재개
 
     def selected_index(self) -> int | None:
         t = self.query_one("#lib", DataTable)
