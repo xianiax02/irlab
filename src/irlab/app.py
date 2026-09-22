@@ -325,8 +325,21 @@ class IrlabApp(App[None]):
         elif tag == "TXERR":
             self.log_line(f"[red]발사 거부[/] {p[1] if len(p) > 1 else ''} — 프로토콜 적용 실패")
         elif tag == "ACT":
-            # 해독은 실패했지만 신호는 들어온다 — "안 온다" 와 구별되는 상태다.
-            self.log_line(f"[신호 감지] 엣지 {p[1]}회/초 — 수신은 되는데 해독 실패")
+            # @ACT,<ms>,<엣지수>,<같은 창에서 해독됨 0/1>
+            # ⚠️ 엣지가 있다 ≠ 해독 실패다. 정상 해독된 프레임도 엣지를 만든다.
+            #    종전에는 조건 없이 "해독 실패" 를 붙여서, 리모컨이 잘 읽힌 줄
+            #    바로 밑에 실패라고 찍혔다. 판정은 펌웨어가 실어 보낸 값으로 한다.
+            edges = p[1] if len(p) > 1 else "?"
+            decoded = (p[2] == "1") if len(p) > 2 else None
+            if decoded:
+                return          # 방금 찍힌 프레임이 만든 엣지다 — 조용히 넘긴다
+            if decoded is None:
+                self.log_line(f"[신호 활동] 엣지 {edges}회/초 "
+                              "(구버전 펌웨어 — 해독 여부를 같이 안 보낸다)")
+                return
+            # 여기만이 진짜 "닿는데 못 읽는다" 다. ①안 닿음 과 구별되는 상태다.
+            self.log_line(f"[yellow]신호는 들어오는데 해독이 안 된다[/] "
+                          f"엣지 {edges}회/초 — 캐리어 주파수·거리·전원 노이즈 의심")
         elif tag == "PUSHSENT":
             self.log_line(f"발사 완료 raw {p[1]} @ {p[2]}kHz")
 
