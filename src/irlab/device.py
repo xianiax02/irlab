@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import glob
 import os
+import subprocess
 import termios
 from collections.abc import Callable
 
@@ -31,6 +32,39 @@ def find_ports() -> list[str]:
     out: list[str] = []
     for g in PORT_GLOBS:
         out.extend(sorted(glob.glob(g)))
+    return out
+
+
+def port_holders(path: str) -> list[str]:
+    """이 포트를 열어둔 **다른** 프로세스들을 사람이 읽을 형태로 돌려준다.
+
+    ⚠️ 여기서 중요한 사실 하나 — **macOS 의 `/dev/cu.*` 는 배타 열기가 아니다.**
+    다른 프로그램이 이미 열어두고 있어도 `open()` 은 그냥 성공한다. 대신 도착한
+    바이트를 **먼저 읽는 쪽이 가져가서**, 양쪽 다 프레임을 띄엄띄엄 놓친다.
+    즉 실패가 아니라 **조용한 데이터 손실**이다 — 에러도 안 나고 화면만 빈다.
+    (2026-09-22 실측으로 확인. 그 전엔 "Resource busy 가 날 것"이라고 잘못 알았다.)
+
+    그래서 열기 성공/실패와 **무관하게** 매번 물어야 한다.
+
+    죽이지는 않는다. 남의 `pio monitor` 나 다른 사람 세션을 끄는 건 되돌릴 수 없다.
+    누구인지만 알려주고 판단은 사람에게 맡긴다.
+    """
+    try:
+        # ⚠️ `-t` 를 같이 주면 안 된다 — `-F` 를 덮어써서 PID 숫자만 나오고
+        # 접두어 파싱이 통째로 빈손이 된다(2026-09-22 에 그 버그를 냈다).
+        r = subprocess.run(["lsof", "-F", "cp", path],
+                           capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return []            # lsof 가 없는 환경 — 진단만 포기한다
+
+    me = str(os.getpid())
+    out, pid = [], None
+    for line in r.stdout.splitlines():
+        if line.startswith("p"):
+            pid = line[1:]
+        elif line.startswith("c") and pid and pid != me:
+            out.append(f"PID {pid} {line[1:]}")
+            pid = None
     return out
 
 

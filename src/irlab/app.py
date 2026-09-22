@@ -23,7 +23,7 @@ from textual.widgets import (
 from pathlib import Path
 
 from .decode import describe
-from .device import Device, find_ports
+from .device import Device, find_ports, port_holders
 from .library import DEFAULT_DIR, Library, Signal, list_stores
 
 MAX_STREAM = 200
@@ -120,6 +120,35 @@ class LabelModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class PortModal(ModalScreen[str | None]):
+    """시리얼 포트 선택. 후보가 둘 이상일 때만 뜬다.
+
+    첫 번째를 말없이 고르면 보드가 둘일 때 엉뚱한 기기에 붙는다.
+    """
+
+    BINDINGS = [("escape", "cancel", "취소")]
+
+    def __init__(self, ports: list[str]) -> None:
+        super().__init__()
+        self.ports = ports
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="storebox"):
+            yield Label("시리얼 포트를 고르세요  (↑↓ + Enter)")
+            yield ListView(*[ListItem(Label(p), name=p) for p in self.ports],
+                           id="portlist")
+
+    def on_mount(self) -> None:
+        self.query_one("#portlist", ListView).focus()
+
+    @on(ListView.Selected)
+    def picked(self, e: ListView.Selected) -> None:
+        self.dismiss(e.item.name)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class IrlabApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
@@ -143,6 +172,7 @@ class IrlabApp(App[None]):
         ("a", "set_label", "위치라벨"),
         ("t", "reach_test", "수신시험"),
         ("c", "export_csv", "CSV"),
+        ("k", "reconnect", "재연결"),
         ("d", "delete_signal", "삭제"),
         ("p", "apply_protocol", "프로토콜적용"),
         ("m", "pick_store", "매장"),
@@ -163,6 +193,10 @@ class IrlabApp(App[None]):
         # self.last(=마지막 수신)와 갈라야 하는 이유는 저장 경로 주석 참조.
         self.slot: dict | None = None
         self._hold = False                 # 저장 중 굴림 재무장 정지
+        # 연결 실패 사유. 상태바가 "끊김" 만 띄우면 원인 셋(미연결/점유/장치아님)이
+        # 구별되지 않아 현장에서 케이블부터 다시 꽂게 된다.
+        self.conn_why = ""
+        self.shared_with: list[str] = []   # 같은 포트를 연 다른 프로세스
         self.pos_label = ""                # 현재 측정 위치
         self.rows: list[dict] = []         # 시험 기록 (CSV 로 나간다)
         self._tally: dict | None = None    # 시험 중 계수기
@@ -195,23 +229,71 @@ class IrlabApp(App[None]):
             self.pick_store_flow(first=True)
 
     # ── 연결 ──
-    def connect(self) -> None:
-        port = self.want_port
+    def connect(self, port: str | None = None) -> None:
+        port = port or self.want_port
         if not port:
             ports = find_ports()
             if not ports:
-                self.log_line("포트를 못 찾았다 — USB 연결과 pio monitor 를 확인.")
+                self.conn_why = "보드를 못 찾음 — USB 를 확인"
+                self.log_line("[yellow]포트가 하나도 없다[/] — USB 연결을 확인하세요")
                 self.refresh_bar()
                 return
+            if len(ports) > 1:
+                # 보드가 둘 이상이면 첫 번째를 말없이 고르면 안 된다. 엉뚱한 기기에
+                # 붙어서 "왜 반응이 없지" 가 된다.
+                self.pick_port_flow(ports)
+                return
             port = ports[0]
+
+        # ⚠️ 점유 확인은 **열기 전에** 한다. macOS cu.* 는 배타가 아니라서 남이
+        # 열어둬도 open 이 성공한다 — 그러면 바이트를 나눠 갖고 양쪽 다 프레임을
+        # 놓친다. 에러가 안 나므로 묻지 않으면 영영 모른다.
+        self.shared_with = port_holders(port)
+
         try:
             self.dev.open(port)
-            self.log_line(f"연결 {port}")
+            self.conn_why = ""
+            self.log_line(f"[green]연결[/] {port}")
+            if self.shared_with:
+                who = " · ".join(self.shared_with)
+                self.log_line(f"[b yellow]⚠ 이 포트를 {who} 도 열어두고 있다[/]")
+                self.log_line("   macOS 시리얼은 배타가 아니라 **바이트를 나눠 갖는다** "
+                              "— 양쪽 다 프레임을 놓친다")
+                self.log_line(f"   그 창을 닫고 [b]k[/] 로 재연결할 것 "
+                              f"(강제: kill {self.shared_with[0].split()[1]})")
             self.dev.send("?")
         except (OSError, ValueError) as e:
-            # 열기 실패로 앱 전체가 죽으면 안 된다 — 포트만 다시 잡으면 되는 상태다.
-            self.log_line(f"[red]열기 실패[/] {port}: {e}")
+            msg = str(e)
+            if "시리얼 장치가 아니다" in msg or "not supported" in msg.lower():
+                self.conn_why = "시리얼 장치가 아님"
+                self.log_line(f"[red]{port} 는 시리얼 장치가 아니다[/] — 포트를 다시 고르세요")
+            elif self.shared_with:
+                self.conn_why = f"{self.shared_with[0]} 가 점유"
+                self.log_line(f"[red]포트를 못 연다[/] {port} — {self.shared_with[0]} 가 쓰는 중")
+            else:
+                self.conn_why = msg[:40]
+                self.log_line(f"[red]열기 실패[/] {port}: {e}")
         self.refresh_bar()
+
+    def action_reconnect(self) -> None:
+        """포트를 다시 잡는다.
+
+        종전에는 재시도 수단이 없어서, 다른 창을 닫고도 앱을 껐다 켜야 했다.
+        """
+        self.dev.close()
+        self.shared_with = []
+        self.log_line("재연결 시도…")
+        self.connect()
+
+    @work
+    async def pick_port_flow(self, ports: list[str]) -> None:
+        self.log_line(f"포트 후보 {len(ports)}개 — 고르세요")
+        sel = await self.push_screen_wait(PortModal(ports))
+        if sel:
+            self.connect(sel)
+        else:
+            self.conn_why = "포트 미선택 — k 로 다시"
+            self.refresh_bar()
 
     # ── 매장 ──
     def action_pick_store(self) -> None:
@@ -229,7 +311,15 @@ class IrlabApp(App[None]):
 
     # ── 표시 ──
     def refresh_bar(self) -> None:
-        conn = f"[green]● {self.dev.path}[/]" if self.dev.connected else "[red]● 끊김[/]"
+        if self.dev.connected and self.shared_with:
+            # 연결은 됐지만 남과 나눠 쓰는 중 — 초록으로 띄우면 안 된다.
+            conn = (f"[b yellow]◐ {self.dev.path}  ⚠ {len(self.shared_with)}개와 공유 중 "
+                    f"— 프레임을 놓친다[/]")
+        elif self.dev.connected:
+            conn = f"[green]● {self.dev.path}[/]"
+        else:
+            # 왜 끊겼는지를 같이 띄운다. "끊김" 만으로는 원인 셋이 구별되지 않는다.
+            conn = "[red]● 끊김[/]" + (f" [dim]({self.conn_why})[/]" if self.conn_why else "")
         mode = "[b green]READ 리딩중[/]" if self.reading else "[dim]READ 정지[/]"
         store = (f"매장 [b]{self.lib.store}[/]   신호 {len(self.lib.signals)}개")\
             if self.lib else "[yellow]매장 미선택 — m[/]"
@@ -269,7 +359,8 @@ class IrlabApp(App[None]):
         self.log_line(line)
 
     def dev_lost(self, why: str) -> None:
-        self.log_line(f"[red]연결 끊김[/] {why}")
+        self.conn_why = "USB 분리 추정 — k 로 재연결"
+        self.log_line(f"[red]연결 끊김[/] {why}  —  [b]k[/] 로 재연결")
         if self._tally is not None:
             self._tally["lost"] = True
         self.refresh_bar()
