@@ -15,15 +15,28 @@
 ## 설치
 
 ```bash
-pip install ggirlab            # PyPI (발행 예정)
-uv tool install ggirlab        # 또는 격리 설치
-
-# 소스에서
-uv tool install git+https://github.com/xianiax02/irlab
-irlab
+uv tool install ggirlab
+ggirlab
 ```
 
-Python 3.11+ 필요. macOS / Linux.
+`uv` 가 없으면: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+한 번만 써볼 거면 설치 없이 `uvx ggirlab`.
+
+> [!warning] `pip install ggirlab` 은 대개 실패한다
+> **macOS 기본 `python3` 는 3.9** 이고(Xcode 번들), 이 패키지는 `requires-python >=3.11` 이라
+> 거부된다. 게다가 그 인터프리터는 시스템이 쓰는 것이라 패키지를 깔면 안 된다.
+> `uv tool install` 은 **필요한 Python 을 알아서 받아** 격리 환경에 넣는다.
+>
+> 3.11+ 가상환경 안에서라면 `pip install ggirlab` 도 물론 된다.
+
+Python 3.11+ · macOS / Linux.
+
+### 소스에서
+
+```bash
+uv tool install git+https://github.com/xianiax02/irlab   # 원격
+uv tool install --force ~/irlab                          # 로컬 작업 트리
+```
 
 ## 쓰기
 
@@ -46,6 +59,7 @@ irlab --version       # 버전 · 코드 지문 · 설치 경로
 uv tool install --force ~/irlab                                  # 로컬 소스에서
 uv tool install --force git+https://github.com/xianiax02/irlab   # 원격에서
 uv tool upgrade ggirlab                                          # PyPI 판은 이걸로 된다
+#  ⚠️ 로컬 경로에서 설치했다면 버전이 같을 때 조용히 건너뛴다 → --force 를 쓸 것
 ```
 
 반영됐는지는 **코드 지문으로 대조**한다. 버전 번호는 올리는 걸 잊을 수 있지만
