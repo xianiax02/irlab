@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -100,14 +101,24 @@ class Library:
             self.signals.append(Signal(**known))
 
     def save(self) -> Path:
+        """**원자적으로** 쓴다 — 임시 파일에 다 쓰고 os.replace 로 갈아끼운다.
+
+        write_text 는 먼저 자르고 그다음 쓴다. 현장에서 그 사이에 죽거나 USB
+        허브째 전원이 나가면 매장 신호가 통째로 빈 파일이 된다. 다시 캡처하려면
+        매장에 다시 가야 하는 자료라 그 위험을 지지 않는다.
+        """
         self.base.mkdir(parents=True, exist_ok=True)
         payload = {
             "store": self.store,
             "updated_at": dt.datetime.now().isoformat(timespec="seconds"),
             "signals": [asdict(s) for s in self.signals],
         }
-        self.path.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = self.path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.path)
         return self.path
 
     # ── 편집 ──

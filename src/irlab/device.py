@@ -38,18 +38,41 @@ class Device:
     """열림/읽기/쓰기 + '@' 줄 파싱."""
 
     def __init__(self, on_event: Callable[[str, list[str]], None],
-                 on_raw: Callable[[str], None]) -> None:
+                 on_raw: Callable[[str], None],
+                 on_lost: Callable[[str], None] | None = None) -> None:
         self.on_event = on_event
         self.on_raw = on_raw
+        # 기기가 빠졌을 때 호출된다. 없으면 조용히 끊긴다.
+        self.on_lost = on_lost
         self.fd: int | None = None
         self.path: str | None = None
         self._buf = b""
         # 기기 응답을 기다리는 곳. raw 전송은 ack 없이 보내면 조용히 어긋난다.
         self._ack: dict[str, asyncio.Future] = {}
+        # 전송 하나가 끝나기 전에 다음이 끼어들면 ack 가 뒤섞이고, 기기 버퍼에는
+        # 두 전송이 누적돼 "버퍼 초과" 로 터진다. 직렬화한다.
+        self._txlock = asyncio.Lock()
+        self._out = b""            # 아직 못 쓴 꼬리
+        self._writing = False      # add_writer 등록 여부
 
     # ── 연결 ──
     def open(self, path: str, baud: int = BAUD) -> None:
+        """열기 실패는 전부 OSError 로 올린다.
+
+        termios.error 는 **OSError 의 하위가 아니다.** tty 가 아닌 경로나 뽑힌 뒤
+        남은 장치 노드를 열면 여기서 termios.error 가 나는데, 부르는 쪽이
+        OSError 만 잡고 있어서 앱이 시작하자마자 트레이스백으로 죽었다.
+        """
         fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+        try:
+            return self._configure(fd, path, baud)
+        except Exception as e:
+            os.close(fd)               # 실패 경로에서 fd 가 새면 재시도가 막힌다
+            if isinstance(e, termios.error):
+                raise OSError(f"{path}: 시리얼 장치가 아니다 ({e})") from e
+            raise
+
+    def _configure(self, fd: int, path: str, baud: int) -> None:
         iflag, oflag, cflag, lflag, _, _, cc = termios.tcgetattr(fd)
         iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.PARMRK | termios.ISTRIP
                    | termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
@@ -70,10 +93,14 @@ class Device:
     def close(self) -> None:
         if self.fd is None:
             return
+        loop = asyncio.get_running_loop()
         try:
-            asyncio.get_running_loop().remove_reader(self.fd)
+            loop.remove_reader(self.fd)
+            if self._writing:
+                loop.remove_writer(self.fd)
         except Exception:
             pass
+        self._writing = False
         try:
             os.close(self.fd)
         except OSError:
@@ -85,12 +112,36 @@ class Device:
         return self.fd is not None
 
     # ── 읽기 ──
+    def _lost(self, why: str) -> None:
+        """기기가 사라졌다. **반드시 reader 를 떼야 한다.**
+
+        tty 가 EOF(b"") 를 돌려주는 상태로 fd 를 등록해 두면 이벤트 루프가
+        계속 '읽을 수 있음' 으로 깨워서 100% CPU 로 돌고 화면이 멈춘다.
+        현장에서 USB 를 뽑는 건 정상 이벤트라 조용히 무시하면 안 된다.
+        """
+        path = self.path or "?"
+        self._out = b""
+        self.close()
+        for f in self._ack.values():
+            if not f.done():
+                f.set_exception(RuntimeError(f"연결 끊김: {why}"))
+        self._ack.clear()
+        if self.on_lost:
+            self.on_lost(f"{path} — {why}")
+
     def _readable(self) -> None:
+        if self.fd is None:
+            return
         try:
             chunk = os.read(self.fd, 8192)
-        except OSError:
+        except BlockingIOError:
+            return
+        except OSError as e:
+            # ENXIO/EIO = 장치가 빠졌다. 그 외도 더 읽을 수 없는 상태다.
+            self._lost(os.strerror(e.errno or 0) or str(e))
             return
         if not chunk:
+            self._lost("EOF (USB 분리 추정)")
             return
         self._buf += chunk
         while b"\n" in self._buf:
@@ -114,8 +165,43 @@ class Device:
 
     # ── 쓰기 ──
     def send(self, cmd: str) -> None:
-        if self.fd is not None:
-            os.write(self.fd, (cmd + "\n").encode())
+        """한 줄을 **끝까지** 보낸다 — 못 쓴 꼬리는 큐에 남기고 루프가 마저 쓴다.
+
+        두 가지를 동시에 지켜야 한다.
+        ① fd 가 O_NONBLOCK 이라 os.write 는 일부만 쓰고 그 길이를 돌려준다.
+           반환값을 버리면 긴 rawdata 줄이 잘려 나가고, 기기는 짧아진 줄을 정상으로
+           파싱한다 — 증상은 엉뚱한 "개수 불일치" 로 나타난다.
+        ② 그렇다고 여기서 블로킹하면 안 된다. 버퍼를 비우는 쪽도 같은 이벤트 루프의
+           콜백이라, 버퍼가 차는 순간 서로를 기다리며 화면째 멈춘다.
+           (selftest 6번에서 실제로 걸렸다.)
+        """
+        if self.fd is None:
+            return
+        self._out += (cmd + "\n").encode()
+        self._flush()
+
+    def _flush(self) -> None:
+        if self.fd is None:
+            return
+        while self._out:
+            try:
+                n = os.write(self.fd, self._out)
+            except BlockingIOError:
+                break
+            except OSError as e:
+                self._lost(os.strerror(e.errno or 0) or str(e))
+                return
+            if n <= 0:
+                break
+            self._out = self._out[n:]
+
+        loop = asyncio.get_running_loop()
+        if self._out and not self._writing:
+            loop.add_writer(self.fd, self._flush)
+            self._writing = True
+        elif not self._out and self._writing:
+            loop.remove_writer(self.fd)
+            self._writing = False
 
     def _arm(self, tag: str) -> asyncio.Future:
         """응답 대기를 **명령을 보내기 전에** 건다.
@@ -146,22 +232,28 @@ class Device:
         결국 "버퍼 초과" 로 터진다 (2026-09-21 실제로 겪음). 조용히 어긋나느니
         느려도 매 줄을 확인한다.
         """
-        fut = self._arm("PUSHBEG")
-        self.send(f"rawbegin {khz}")
-        await self._wait("PUSHBEG", fut)       # 버퍼가 실제로 비워졌는지 확인
+        if not timings:
+            raise RuntimeError("raw 가 비어 있다")
+        if self.fd is None:
+            raise RuntimeError("연결 안 됨")
 
-        sent = 0
-        for i in range(0, len(timings), chunk):
-            part = timings[i:i + chunk]
-            fut = self._arm("PUSHBUF")
-            self.send("rawdata " + " ".join(str(v) for v in part))
-            got = await self._wait("PUSHBUF", fut)
-            sent += len(part)
-            n = int(got[0]) if got and got[0].isdigit() else -1
-            if n != sent:
-                raise RuntimeError(f"개수 불일치: 보낸 {sent} ≠ 기기 {n}")
+        async with self._txlock:
+            fut = self._arm("PUSHBEG")
+            self.send(f"rawbegin {khz}")
+            await self._wait("PUSHBEG", fut)   # 버퍼가 실제로 비워졌는지 확인
 
-        fut = self._arm("PUSHSENT")
-        self.send("rawsend")
-        await self._wait("PUSHSENT", fut, timeout=4.0)
-        return sent
+            sent = 0
+            for i in range(0, len(timings), chunk):
+                part = timings[i:i + chunk]
+                fut = self._arm("PUSHBUF")
+                self.send("rawdata " + " ".join(str(v) for v in part))
+                got = await self._wait("PUSHBUF", fut)
+                sent += len(part)
+                n = int(got[0]) if got and got[0].isdigit() else -1
+                if n != sent:
+                    raise RuntimeError(f"개수 불일치: 보낸 {sent} ≠ 기기 {n}")
+
+            fut = self._arm("PUSHSENT")
+            self.send("rawsend")
+            await self._wait("PUSHSENT", fut, timeout=4.0)
+            return sent

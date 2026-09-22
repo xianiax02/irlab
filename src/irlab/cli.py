@@ -21,7 +21,13 @@ def main() -> int:
     ap.add_argument("--list-ports", action="store_true")
     ap.add_argument("--stores", action="store_true", help="저장된 매장 목록")
     ap.add_argument("--show", action="store_true", help="매장 신호 목록만 출력하고 종료")
+    ap.add_argument("--selftest", action="store_true",
+                    help="실기기 없이 호스트 프로토콜을 검증 (가짜 펌웨어를 pty 로 띄운다)")
     a = ap.parse_args()
+
+    if a.selftest:
+        from .selftest import main as selftest_main
+        return selftest_main()
 
     base = Path(a.dir) if a.dir else None
 
