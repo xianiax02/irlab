@@ -139,7 +139,7 @@ class IrlabApp(App[None]):
     BINDINGS = [
         ("r", "toggle_read", "리딩"),
         ("s", "save_signal", "저장"),
-        ("enter", "send_selected", "쏘기"),
+        ("enter", "send_selected", "고른 신호 쏘기"),
         ("a", "set_label", "위치라벨"),
         ("t", "reach_test", "수신시험"),
         ("c", "export_csv", "CSV"),
@@ -184,6 +184,10 @@ class IrlabApp(App[None]):
     def on_mount(self) -> None:
         t = self.query_one("#lib", DataTable)
         t.add_columns("#", "이름", "프로토콜", "무슨 명령인가", "서버", "raw")
+        # 라이브러리 표에 포커스를 준다. 안 주면 포커스가 수신 로그로 가서
+        # **화살표로 행을 고를 수 없고 커서도 안 보인다** — 그 상태의 enter 는
+        # 늘 0번 행을 쏜다(무엇을 쏘는지 모르는 채로).
+        t.focus()
         self.refresh_lib()
         self.refresh_bar()
         self.connect()
@@ -473,6 +477,16 @@ class IrlabApp(App[None]):
         if self.lib is None or t.cursor_row is None or not self.lib.signals:
             return None
         return int(t.cursor_row)
+
+    @on(DataTable.RowSelected)
+    def row_enter(self, e: DataTable.RowSelected) -> None:
+        """표에 포커스가 있을 때의 enter 는 앱 바인딩까지 안 온다.
+
+        DataTable 이 먼저 먹어서 RowSelected 로 바꿔버리기 때문이다. 그래서
+        **행을 고르려고 표에 포커스를 주는 순간 쏘기가 죽어 있었다** — 버튼이
+        아예 없는 것처럼 보인다(2026-09-22 현장에서 그렇게 보고됨).
+        """
+        self.action_send_selected()
 
     def action_send_selected(self) -> None:
         i = self.selected_index()
