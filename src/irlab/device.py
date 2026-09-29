@@ -291,3 +291,42 @@ class Device:
             self.send("rawsend")
             await self._wait("PUSHSENT", fut, timeout=4.0)
             return sent
+
+    async def fire_ac(self, combo) -> tuple[str, int]:
+        """조합 상태를 기기 IRac 로 합성해 쏜다. 돌려주는 값은 (프로토콜, seq).
+
+        ⚠️ **설정 줄마다 `@STATE` 를 받고, 마지막 상태가 요청과 같아야 `s` 를 보낸다.**
+        설정 한 줄이 유실되거나 구펌웨어가 무시하면 `s` 는 **직전 상태**를 쏜다 —
+        화면은 24℃ 라는데 실물은 26℃ 가 나가고, 에어컨은 그것도 수락한다.
+        """
+        from .combo import from_state
+
+        if self.fd is None:
+            raise RuntimeError("연결 안 됨")
+        async with self._txlock:
+            got: list[str] = []
+            for cmd in combo.commands():
+                fut = self._arm("STATE")
+                self.send(cmd)
+                got = await self._wait("STATE", fut)
+            proto, applied = from_state(got)
+            if applied != combo:
+                raise RuntimeError(f"기기 상태가 요청과 다르다 — 발사 안 함 "
+                                   f"(요청 {combo.summary()} / 기기 {applied.summary()})")
+
+            tx, err = self._arm("TX"), self._arm("TXERR")
+            self.send("s")
+            try:
+                done, _ = await asyncio.wait({tx, err}, timeout=3.0,
+                                             return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                self._ack.pop("TX", None)
+                self._ack.pop("TXERR", None)
+            if not done:
+                raise TimeoutError("발사 응답 없음")
+            if err in done:
+                raise RuntimeError(f"{proto} 적용 실패 — 기기가 발사를 거부했다")
+            p = tx.result()                     # <ms>,<seq>,<proto>,<ok>
+            if len(p) < 4 or p[3] != "1":
+                raise RuntimeError("ir_sender_send_ac 실패")
+            return p[2], int(p[1])

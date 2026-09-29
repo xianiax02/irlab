@@ -24,6 +24,12 @@ class FakeFirmware:
         self.n = 0
         self.khz = 38
         self.lines: list[str] = []
+        # IRac 상태 — 펌웨어 s_cmd 와 같은 필드
+        self.st = {"power": 1, "temp": 25, "mode": 1, "fan": 1, "swing": 0}
+        self.proto = "SAMSUNG_AC"
+        self.seq = 0
+        self.ignore_temp = False   # 설정이 안 먹는 구펌웨어 흉내
+        self.txerr = False         # ir_sender 가 프로토콜을 거부하는 경우
 
     def w(self, s: str) -> None:
         os.write(self.fd, (s + "\n").encode())
@@ -60,8 +66,27 @@ class FakeFirmware:
                 return
             self.w(f"# push 발사 raw {self.n}, {self.khz}kHz")
             self.w(f"@PUSHSENT,1234,{self.n},{self.khz}")
+        elif cmd in ("on", "off"):
+            self.st["power"] = 1 if cmd == "on" else 0
+            self.emit_state()
+        elif cmd in ("m", "t", "f", "w"):
+            key = {"m": "mode", "t": "temp", "f": "fan", "w": "swing"}[cmd]
+            if not (cmd == "t" and self.ignore_temp):
+                self.st[key] = int(arg)
+            self.emit_state()
+        elif cmd == "s":
+            if self.txerr:
+                self.w(f"@TXERR,1000,{self.proto}")
+                return
+            self.seq += 1
+            self.w(f"@TX,1000,{self.seq},{self.proto},1")
         elif cmd == "?":
-            self.w("@STATE,3,5,SAMSUNG_AC,1,25,1,1,0,0")
+            self.emit_state()
+
+    def emit_state(self) -> None:
+        s = self.st
+        self.w(f"@STATE,3,5,{self.proto},{s['power']},{s['temp']},{s['mode']},"
+               f"{s['fan']},{s['swing']},0")
 
     # 기기가 자발적으로 내는 것들
     def emit_rx(self, proto="SAMSUNG_AC", bits=112, hexs="02B20F"):
@@ -147,7 +172,47 @@ async def run() -> int:
     check("사람용 DIFF 줄도 전달된다(’#’ 아님)",
           any("DIFF:" in x for x in raws), str(raws))
 
-    # 6) 기기 분리 → 폭주 없이 끊김 통보
+    # 6) 조합 송신 — 명령 순서·모드 인덱스·적용 확인
+    from .combo import AcCombo, from_state
+    proto, c = from_state("3,5,SAMSUNG_AC,1,25,2,3,1,0".split(","))
+    check("@STATE 필드 순서(power,temp,mode…)",
+          proto == "SAMSUNG_AC" and c == AcCombo(1, 2, 25, 3, 1), repr(c))
+    check("온도는 30 에서 멈춘다", AcCombo(temp=30).step("temp", 1).temp == 30)
+    check("모드는 Fan 다음 Auto 로 돈다", AcCombo(mode=4).step("mode", 1).mode == 0)
+
+    fw.lines.clear()
+    want = AcCombo(power=1, mode=2, temp=22, fan=3, swing=1)     # Heat
+    try:
+        got = await dev.fire_ac(want)
+    except (RuntimeError, TimeoutError) as e:
+        got = repr(e)
+    check("조합 발사가 (프로토콜, seq) 를 돌려준다", got == ("SAMSUNG_AC", 1), str(got))
+    check("보낸 줄이 on·m·t·f·w·s 순서", fw.lines == ["on", "m 2", "t 22", "f 3", "w 1", "s"],
+          str(fw.lines))
+    check("Heat 는 m 2 로 나간다 (Samsung 바이트 순서 m 4 아님)",
+          "m 2" in fw.lines and "m 4" not in fw.lines)
+
+    fw.lines.clear()
+    fw.ignore_temp = True
+    raised = ""
+    try:
+        await dev.fire_ac(AcCombo(temp=18))
+    except RuntimeError as e:
+        raised = str(e)
+    fw.ignore_temp = False
+    check("설정이 안 먹으면 발사 전에 멈춘다", bool(raised) and "s" not in fw.lines,
+          raised or str(fw.lines))
+
+    fw.txerr = True
+    raised = ""
+    try:
+        await dev.fire_ac(AcCombo())
+    except RuntimeError as e:
+        raised = str(e)
+    fw.txerr = False
+    check("@TXERR 가 예외로 전파", bool(raised), raised)
+
+    # 7) 기기 분리 → 폭주 없이 끊김 통보
     os.close(master)
     await asyncio.sleep(0.3)
     check("USB 분리가 끊김으로 보고된다", bool(lost), str(lost))
