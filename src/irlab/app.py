@@ -15,6 +15,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
     DataTable, Footer, Header, Input, Label, ListItem, ListView, Log, Static,
@@ -22,6 +23,7 @@ from textual.widgets import (
 
 from pathlib import Path
 
+from .combo import FIELDS, NAMES, AcCombo, from_state
 from .decode import describe
 from .device import Device, find_ports, port_holders
 from .library import DEFAULT_DIR, Library, Signal, list_stores
@@ -149,6 +151,70 @@ class PortModal(ModalScreen[str | None]):
         self.dismiss(None)
 
 
+class ComboPanel(Static, can_focus=True):
+    """리모컨처럼 칸을 조합해 IRac 로 합성해 쏜다. ←→ 칸 · ↑↓ 값 · enter 쏘기.
+
+    enter 를 여기서 먹는 이유: 앱 바인딩의 enter 는 라이브러리 쏘기다. 포커스로
+    갈라야 "무엇이 나가는지" 가 화면에 보이는 쪽과 일치한다.
+    """
+
+    BINDINGS = [
+        ("left", "move(-1)", "칸"), ("right", "move(1)", "칸"),
+        ("up", "bump(1)", "값"), ("down", "bump(-1)", "값"),
+        ("enter", "fire", "조합 쏘기"),
+    ]
+
+    class Fire(Message):
+        def __init__(self, combo: AcCombo) -> None:
+            super().__init__()
+            self.combo = combo
+
+    def __init__(self, **kw) -> None:
+        super().__init__(**kw)
+        self.combo = AcCombo()
+        self.cursor = 0
+        self.proto = "?"
+        # 편집 중이면 기기 @STATE 가 값을 덮지 않는다 — 고르는 도중 되돌아가면 안 된다.
+        self.dirty = False
+
+    def on_mount(self) -> None:
+        self.redraw()
+
+    def on_focus(self) -> None:
+        self.redraw()
+
+    def on_blur(self) -> None:
+        self.redraw()
+
+    def redraw(self) -> None:
+        cells = []
+        for i, f in enumerate(FIELDS):
+            v = self.combo.label(f)
+            cells.append(f"{NAMES[f]} [reverse]{v}[/]" if i == self.cursor and self.has_focus
+                         else f"{NAMES[f]} [b]{v}[/]")
+        hint = ("←→ 칸  ↑↓ 값  enter 쏘기" if self.has_focus else "tab 으로 조합 선택")
+        self.update("   ".join(cells) + f"\n[dim]{self.proto} · {hint}"
+                    + (" · 미발사 변경" if self.dirty else "") + "[/]")
+
+    def sync(self, proto: str, combo: AcCombo) -> None:
+        self.proto = proto
+        if not self.dirty:
+            self.combo = combo
+        self.redraw()
+
+    def action_move(self, d: int) -> None:
+        self.cursor = (self.cursor + d) % len(FIELDS)
+        self.redraw()
+
+    def action_bump(self, d: int) -> None:
+        self.combo = self.combo.step(FIELDS[self.cursor], d)
+        self.dirty = True
+        self.redraw()
+
+    def action_fire(self) -> None:
+        self.post_message(self.Fire(self.combo))
+
+
 class IrlabApp(App[None]):
     CSS = """
     Screen { layout: vertical; }
@@ -156,6 +222,9 @@ class IrlabApp(App[None]):
     #cols { height: 1fr; }
     #left { width: 3fr; border: round $primary; }
     #right { width: 2fr; border: round $secondary; }
+    #lib { height: 1fr; }
+    #combo { height: 3; padding: 0 1; border-top: solid $secondary; }
+    #combo:focus { background: $boost; }
     #detail { height: 7; border: round $accent; padding: 0 1; }
     #storebox { align: center middle; width: 66; height: 18;
             border: thick $primary; background: $surface; padding: 1 2; }
@@ -212,6 +281,7 @@ class IrlabApp(App[None]):
             with Vertical(id="right"):
                 yield Label("신호 라이브러리", classes="title")
                 yield DataTable(id="lib", cursor_type="row")
+                yield ComboPanel(id="combo")
         yield Static(id="detail")
         yield Footer()
 
@@ -222,6 +292,9 @@ class IrlabApp(App[None]):
         # **화살표로 행을 고를 수 없고 커서도 안 보인다** — 그 상태의 enter 는
         # 늘 0번 행을 쏜다(무엇을 쏘는지 모르는 채로).
         t.focus()
+        # 수신 로그는 tab 순환에서 뺀다. 거기 포커스가 가면 enter 가 보이지 않는
+        # 라이브러리 커서를 쏜다.
+        self.query_one("#stream", Log).can_focus = False
         self.refresh_lib()
         self.refresh_bar()
         self.connect()
@@ -463,6 +536,9 @@ class IrlabApp(App[None]):
             # 여기만이 진짜 "닿는데 못 읽는다" 다. ①안 닿음 과 구별되는 상태다.
             self.log_line(f"[yellow]신호는 들어오는데 해독이 안 된다[/] "
                           f"엣지 {edges}회/초 — 캐리어 주파수·거리·전원 노이즈 의심")
+        elif tag == "STATE":
+            proto, combo = from_state(p)
+            self.query_one(ComboPanel).sync(proto, combo)
         elif tag == "PUSHSENT":
             self.log_line(f"발사 완료 raw {p[1]} @ {p[2]}kHz")
 
@@ -600,6 +676,28 @@ class IrlabApp(App[None]):
             self.log_line("  ✕ 기기 응답 없음 — 연결 확인")
         except RuntimeError as e:
             self.log_line(f"  ✕ {e}")
+
+    @on(ComboPanel.Fire)
+    def combo_fire(self, e: ComboPanel.Fire) -> None:
+        self.fire_combo(e.combo)
+
+    @work(exclusive=True, group="combo")
+    async def fire_combo(self, c: AcCombo) -> None:
+        self.log_line(f"조합 쏘기 «{c.summary()}»")
+        if not self.dev.connected:
+            self.log_line("  ✕ 연결 안 됨")
+            return
+        try:
+            proto, seq = await self.dev.fire_ac(c)
+        except TimeoutError:
+            self.log_line("  ✕ 기기 응답 없음 — 연결 확인 (구펌웨어면 @STATE 를 안 낸다)")
+            return
+        except RuntimeError as e:
+            self.log_line(f"  ✕ {e}")
+            return
+        self.query_one(ComboPanel).dirty = False
+        self.query_one(ComboPanel).redraw()
+        self.log_line(f"  발사 #{seq} {proto} — 발사까지만 확인된다. 도달은 t 로")
 
     # ── 위치 라벨 ──
     @work
